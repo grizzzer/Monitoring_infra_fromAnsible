@@ -1,9 +1,6 @@
 # Мониторинг инфраструктуры РЕД ОС
 
-Финальное задание IT-Планета 2026 — комплексный плейбук Ansible для
-непрерывного мониторинга и автоматического реагирования на инциденты.
-
-Решение собрано на базе наработок `PLAYBOOKS_FINAL_v1`, переработано в ролевую
+Решение собрано на базе наработок, переработано в ролевую
 структуру и адаптировано под точные требования задания (NextCloud, изоляция
 после 3 сбоев, отчёты HTML+PDF, скорость интернета у студентов, и т.д.).
 
@@ -51,9 +48,7 @@ playbooks_v6/
 │   ├── reporting/                 # daily/weekly HTML+PDF+SVG-графики, архивы
 │   ├── dashboard/                 # /monitoring/ Basic Auth + IP allowlist
 │   └── test_scenarios/            # демо-имитация инцидентов (только tag never)
-└── docs/
-    ├── TESTING.md                 # сценарии тестирования
-    └── QA_ANSWERS.md              # ответы на ключевые вопросы по решению
+
 ```
 
 ## Что мониторится (требования задания)
@@ -277,15 +272,6 @@ xdg-open latest_daily.html
 - **Замена SMTP** — vault и `group_vars/monitoring.yml` (`mon_smtp_*`)
 - **Переход на cron вместо systemd timers** — заменить шаблоны `monitor-*.timer.j2`
 
-## Соответствие критериям оценки
-
-| Критерий | Балл | Реализация |
-|---|---:|---|
-| Функциональность | 40 | 9 сервисов + NextCloud, авторестарт, изоляция, отчёты HTML/PDF/JSON/TXT, графики, email с STARTTLS, проверка интернета |
-| Надёжность | 25 | `block/rescue`, `ignore_errors`, retries на dnf, throttle алертов, лимит рестартов, защита от self-DoS, идемпотентность, fault-tolerant скрипты |
-| Безопасность | 15 | AES-256 Vault, chmod 0640/0750, POSIX ACL, no_log на секретах, обязательный STARTTLS+AUTH для отчётов |
-| Удобство | 10 | Ролевая структура по требованию задания, теги help/verify/run_once, README + TESTING.md + QA_ANSWERS.md, демо-теги для имитации |
-| Эффективность | 10 | Bash + systemd timers вместо ansible-pull, Nice=10, CPUQuota=30%, MemoryMax=256M, RandomizedDelaySec для разноса таймеров |
 
 ## Связанная документация
 
