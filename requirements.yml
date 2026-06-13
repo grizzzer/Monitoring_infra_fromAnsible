@@ -1,0 +1,3 @@
+---
+# The solution intentionally uses only ansible.builtin modules.
+collections: []

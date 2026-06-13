@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>@@TITLE@@</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f4f6f8;color:#20242a;margin:0;padding:24px}
+.wrap{max-width:1100px;margin:auto}.card{background:white;border-radius:8px;padding:20px;margin:16px 0;box-shadow:0 1px 5px #ccd}
+h1,h2{color:#8b1d24}.meta{color:#667}.metrics{display:flex;gap:12px;flex-wrap:wrap}
+.metric{min-width:150px;padding:14px;background:#f5f7fb;border-radius:6px}.metric span{display:block;color:#667}.metric strong{font-size:22px}
+table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
+.ok{color:#188038}.bad{color:#b3261e;font-weight:bold}.muted{color:#777}pre{white-space:pre-wrap;max-height:360px;overflow:auto}
+</style>
+</head>
+<body><div class="wrap">
+<h1>@@TITLE@@</h1><div class="meta">Host: @@HOST@@ | Generated: @@GENERATED@@ | Window: @@WINDOW@@ h</div>
+<section class="card"><h2>Metrics — admin</h2><div class="metrics">@@METRICS@@</div></section>
+<section class="card"><h2>Clients (students)</h2>@@CLIENTS@@</section>
+<section class="card"><h2>Services</h2><table><thead><tr><th>Service</th><th>Status</th><th>Enabled</th><th>Action</th></tr></thead><tbody>@@SERVICE_ROWS@@</tbody></table></section>
+<section class="card"><h2>Security</h2><pre>@@SECURITY@@</pre></section>
+<section class="card"><h2>Incidents</h2><pre>@@INCIDENTS@@</pre></section>
+</div></body></html>

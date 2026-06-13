@@ -1,0 +1,46 @@
+---
+- name: "Install performance scripts"
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ mon_base_dir }}/bin/{{ item.dest }}"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    backup: true
+  loop:
+    - { src: monitor_performance.sh, dest: monitor_performance.sh }
+    - { src: monitor_internet.sh, dest: monitor_internet.sh }
+
+- name: "Install performance systemd units"
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - monitor-performance.service
+    - monitor-performance.timer
+    - monitor-internet.service
+    - monitor-internet.timer
+  notify: reload performance systemd
+
+- name: "Enable performance timers"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - monitor-performance.timer
+    - monitor-internet.timer
+
+- name: "Run performance checks now"
+  ansible.builtin.command: "{{ mon_base_dir }}/bin/{{ item }}"
+  loop:
+    - monitor_performance.sh
+    - monitor_internet.sh
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [run_once, verify]

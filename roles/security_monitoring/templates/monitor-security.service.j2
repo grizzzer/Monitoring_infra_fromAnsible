@@ -1,0 +1,19 @@
+[Unit]
+Description=REDOS Monitoring — security check
+After=network-online.target sshd.service firewalld.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=30%
+MemoryMax=256M
+TasksMax=64
+ExecStart={{ mon_base_dir }}/bin/monitor_security.sh
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SuccessExitStatus=0 1
+TimeoutStopSec=30
+KillMode=mixed

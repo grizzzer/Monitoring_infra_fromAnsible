@@ -1,0 +1,13 @@
+[Unit]
+Description=REDOS Monitoring — services check (timer, every 5 minutes)
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec={{ mon_freq_services }}s
+RandomizedDelaySec=15
+AccuracySec=5s
+Unit=monitor-services.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

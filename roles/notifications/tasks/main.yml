@@ -1,0 +1,329 @@
+---
+# ============================================================
+#  roles/notifications — email-уведомления через iRedMail
+#
+#  По умолчанию: отправка через submission 587 с STARTTLS+SASL AUTH
+#  Отправитель — student1@redos.test (через iRedMail с auth)
+#  Получатель — sysadmin@redos.test
+# ============================================================
+
+- name: "Установка скрипта monitor_send_mail.sh"
+  ansible.builtin.copy:
+    src: monitor_send_mail.sh
+    dest: /usr/local/bin/monitor_send_mail.sh
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    backup: yes
+  tags: [notifications, scripts]
+
+- name: "Install strict STARTTLS report sender"
+  ansible.builtin.copy:
+    src: monitor_send_report.py
+    dest: /usr/local/bin/monitor_send_report.py
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    backup: true
+  tags: [notifications, scripts]
+
+# ============================================================
+#  Submission port 587 + STARTTLS + SASL AUTH
+#  По умолчанию iRedMail не активирует submission — раскомменчиваем
+# ============================================================
+- name: "Проверка: submission в master.cf"
+  ansible.builtin.shell: |
+    grep -E "^submission\s" /etc/postfix/master.cf >/dev/null 2>&1 && echo "active" || echo "inactive"
+  register: __notify_submission_state
+  changed_when: false
+  check_mode: no
+  tags: [notifications, submission]
+
+- name: "Добавление блока submission в master.cf"
+  ansible.builtin.blockinfile:
+    path: /etc/postfix/master.cf
+    backup: yes
+    marker: "# {mark} ANSIBLE MANAGED — submission (587)"
+    block: |
+      submission inet n       -       n       -       -       smtpd
+        -o syslog_name=postfix/submission
+        -o smtpd_tls_security_level=encrypt
+        -o smtpd_sasl_auth_enable=yes
+        -o smtpd_reject_unlisted_recipient=no
+        -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+        -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+        -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
+        -o milter_macro_daemon_name=ORIGINATING
+  when: __notify_submission_state.stdout == "inactive"
+  notify: restart postfix
+  tags: [notifications, submission]
+
+# ============================================================
+#  Права postfix на ad_*.cf (часто root:root 0600 → postfix не читает)
+# ============================================================
+- name: "Postfix: права на ad_*.cf — readable postfix"
+  ansible.builtin.shell: |
+    if ls /etc/postfix/ad_*.cf >/dev/null 2>&1; then
+        chgrp postfix /etc/postfix/ad_*.cf
+        chmod 0640 /etc/postfix/ad_*.cf
+    fi
+  changed_when: false
+  ignore_errors: yes
+  tags: [notifications, postfix]
+
+# Удаление iRedMail-перебивающего transport-правила для redos.test
+- name: "Удаление transport-override redos.test (если есть)"
+  ansible.builtin.lineinfile:
+    path: /etc/postfix/transport
+    regexp: '^redos\.test\s'
+    state: absent
+    backup: yes
+  register: __notify_transport_clean
+  ignore_errors: yes
+  tags: [notifications, postfix]
+
+- name: "postmap transport (после правки)"
+  ansible.builtin.command: postmap /etc/postfix/transport
+  when: __notify_transport_clean.changed
+  ignore_errors: yes
+  tags: [notifications, postfix]
+
+# ============================================================
+#  Postfix: транспорт через Dovecot LMTP, SASL через Dovecot,
+#  отключение SMTPUTF8 (Dovecot LMTP его не поддерживает)
+# ============================================================
+- name: "Postfix: virtual_transport + SASL Dovecot + smtputf8 off"
+  ansible.builtin.shell: |
+    postconf -e "virtual_transport=lmtp:unix:private/dovecot-lmtp"
+    postconf -e "mailbox_transport=lmtp:unix:private/dovecot-lmtp"
+    postconf -e "smtpd_sasl_type=dovecot"
+    postconf -e "smtpd_sasl_path=private/auth"
+    postconf -e "smtpd_sasl_auth_enable=yes"
+    postconf -e "broken_sasl_auth_clients=yes"
+    postconf -e "smtpd_sasl_security_options=noanonymous"
+    postconf -e "smtputf8_enable=no"
+  changed_when: true
+  notify: restart postfix
+  tags: [notifications, postfix]
+
+# ============================================================
+#  Dovecot: LMTP listener + SASL listener + mail_location
+# ============================================================
+- name: "Dovecot: LMTP socket в postfix queue"
+  ansible.builtin.copy:
+    dest: /etc/dovecot/conf.d/90-postfix-lmtp.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Ansible managed — LMTP socket для приёма почты от postfix
+      service lmtp {
+        unix_listener /var/spool/postfix/private/dovecot-lmtp {
+          mode = 0600
+          user = postfix
+          group = postfix
+        }
+      }
+  notify: restart dovecot
+  tags: [notifications, dovecot]
+
+- name: "Dovecot: SASL socket для postfix submission"
+  ansible.builtin.copy:
+    dest: /etc/dovecot/conf.d/91-postfix-auth.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Ansible managed — Dovecot SASL listener
+      service auth {
+        unix_listener /var/spool/postfix/private/auth {
+          mode = 0660
+          user = postfix
+          group = postfix
+        }
+      }
+      auth_mechanisms = plain login
+  notify: restart dovecot
+  tags: [notifications, dovecot]
+
+- name: "Dovecot: mail_uid/mail_gid (Samba AD не отдаёт mailUidNumber)"
+  ansible.builtin.copy:
+    dest: /etc/dovecot/conf.d/92-mail-location.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Ansible managed — virtual mail user mapping
+      mail_uid = vmail
+      mail_gid = mail
+      mail_home = /var/vmail/vmail1/%d/%n
+      mail_location = maildir:~/Maildir
+      first_valid_uid = 89
+      last_valid_uid = 65000
+      first_valid_gid = 12
+      last_valid_gid = 65000
+  notify: restart dovecot
+  tags: [notifications, dovecot]
+
+# ============================================================
+#  Maildir для доменных юзеров (sysadmin, student1-3)
+# ============================================================
+- name: "Maildir каталоги"
+  ansible.builtin.file:
+    path: "/var/vmail/vmail1/{{ mon_domain }}/{{ item[0] }}/Maildir/{{ item[1] }}"
+    state: directory
+    owner: vmail
+    group: mail
+    mode: '0700'
+  loop: "{{ ['sysadmin','student1','student2','student3'] | product(['','new','cur','tmp']) | list }}"
+  ignore_errors: yes
+  tags: [notifications, maildir]
+
+# ============================================================
+#  SELinux: разрешаем Dovecot писать в /var/vmail
+# ============================================================
+- name: "SELinux: метим /var/vmail как mail_spool_t"
+  ansible.builtin.command:
+    cmd: "semanage fcontext -a -t mail_spool_t '/var/vmail(/.*)?'"
+  register: __notify_sefcontext
+  changed_when: __notify_sefcontext.rc == 0
+  failed_when: false
+  tags: [notifications, selinux]
+
+- name: "SELinux: restorecon"
+  ansible.builtin.command: restorecon -R /var/vmail
+  changed_when: false
+  ignore_errors: yes
+  tags: [notifications, selinux]
+
+# Если стенд из коробки в Enforcing блокирует — мягко в Permissive.
+# Защита остаётся на уровне chmod/ACL/htpasswd/firewalld.
+# Aliases
+- name: "Алиас monitoring -> sysadmin"
+  ansible.builtin.lineinfile:
+    path: /etc/aliases
+    regexp: '^monitoring:'
+    line: "monitoring: {{ mon_alert_to }}"
+    create: yes
+    backup: yes
+    mode: '0644'
+  register: __notify_aliases
+  tags: [notifications]
+
+- name: "newaliases"
+  ansible.builtin.command: newaliases
+  when: __notify_aliases.changed
+  changed_when: true
+  ignore_errors: yes
+  tags: [notifications]
+
+- name: "Запуск postfix и dovecot"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop:
+    - postfix
+    - dovecot
+  ignore_errors: yes
+  tags: [notifications]
+
+# --- verify ---
+- name: "Проверка: submission 587 слушает"
+  ansible.builtin.shell: "ss -tln 2>/dev/null | grep -E ':587\\b' && echo OK || echo INACTIVE"
+  register: __notify_587
+  changed_when: false
+  check_mode: no
+  tags: [notifications, verify]
+
+- name: ">>> submission 587"
+  ansible.builtin.debug:
+    msg: "{{ __notify_587.stdout }}"
+  tags: [notifications, verify]
+
+- name: "Create STARTTLS test report"
+  ansible.builtin.copy:
+    dest: /tmp/monitoring_tls_test.txt
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      REDOS Monitoring STARTTLS test email
+      ====================================
+
+      Triggered: ansible-playbook monitoring_playbook.yml --tags test_mail
+      Host:      {{ inventory_hostname }}
+      Time:      {{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -Iseconds')) }}
+
+      If you can read this in SOGo Inbox of {{ mon_alert_to }}, the entire
+      email pipeline works:
+        - Submission 587 with STARTTLS
+        - SMTP AUTH as {{ vault_smtp_user | default('?') }}
+        - LDAP virtual_mailbox lookup
+        - LMTP delivery to Maildir
+  tags: [never, test_mail]
+
+# Сбрасываем throttle, чтобы письмо точно отправилось
+- name: "Reset email throttle for test_mail"
+  ansible.builtin.shell: |
+    rm -f {{ mon_state_dir }}/throttle/test_mail* 2>/dev/null || true
+  changed_when: false
+  failed_when: false
+  tags: [never, test_mail]
+
+# ВНИМАНИЕ: НЕ используем no_log: true — иначе при ошибке ничего не видно.
+# Захватываем stdout+stderr и печатаем РЕАЛЬНУЮ причину.
+- name: "Send test mail via monitor_send_report.py (STARTTLS, with TLS proof)"
+  ansible.builtin.shell: |
+    set -a
+    . {{ mon_config_dir }}/monitor.env
+    set +a
+    /usr/local/bin/monitor_send_report.py \
+      "{{ mon_alert_subject_prefix }} STARTTLS test $(date +%H:%M:%S)" \
+      /tmp/monitoring_tls_test.txt \
+      /tmp/monitoring_tls_test.txt 2>&1
+  register: tls_mail_test
+  changed_when: false
+  failed_when: false
+  tags: [never, test_mail]
+
+- name: "Send test mail via monitor_send_mail.sh (universal fallback)"
+  ansible.builtin.shell: |
+    /usr/local/bin/monitor_send_mail.sh \
+      "{{ mon_alert_subject_prefix }} test_mail $(date +%H:%M:%S)" \
+      "$(cat /tmp/monitoring_tls_test.txt)" \
+      "{{ mon_alert_to }}" 2>&1
+  register: simple_mail_test
+  changed_when: false
+  failed_when: false
+  tags: [never, test_mail]
+
+# Читаем alerts.log через отдельный shell-task с become (lookup pipe не имеет
+# доступа к 0640 root:monitoring файлам). Это и было причиной падения.
+- name: "Read last 10 lines of alerts.log"
+  ansible.builtin.shell: tail -n 10 {{ mon_log_dir }}/alerts.log 2>/dev/null || echo "(empty)"
+  register: alerts_tail
+  changed_when: false
+  failed_when: false
+  tags: [never, test_mail]
+
+- name: "STARTTLS test result (with TLS proof)"
+  ansible.builtin.debug:
+    msg:
+      - "=== monitor_send_report.py (STARTTLS + AUTH) ==="
+      - "rc: {{ tls_mail_test.rc | default('?') }}"
+      - "{{ tls_mail_test.stdout_lines | default(['(no output)']) }}"
+      - ""
+      - "=== monitor_send_mail.sh (универсальный отправитель) ==="
+      - "rc: {{ simple_mail_test.rc | default('?') }}"
+      - "{{ simple_mail_test.stdout_lines | default(['(no output)']) }}"
+      - ""
+      - "=== Последние записи в alerts.log ==="
+      - "{{ alerts_tail.stdout_lines | default(['(empty)']) }}"
+      - ""
+      - "Если в выводе выше есть 'OK: report sent via STARTTLS' с TLS=...,"
+      - "значит шифрование работает. Проверь почту в SOGo:"
+      - "  URL:    http://admin.redos.test/SOGo"
+      - "  Логин:  sysadmin@redos.test"
+      - "  Пароль: P@ssw0rd"
+  tags: [never, test_mail]

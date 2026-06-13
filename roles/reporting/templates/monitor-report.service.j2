@@ -1,0 +1,15 @@
+[Unit]
+Description=REDOS Monitoring report - {{ item.description }}
+After=network-online.target
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=30%
+MemoryMax=256M
+EnvironmentFile={{ mon_config_dir }}/monitor.env
+ExecStart={{ mon_base_dir }}/bin/{{ item.command }}
+TimeoutStartSec=600
+SuccessExitStatus=0

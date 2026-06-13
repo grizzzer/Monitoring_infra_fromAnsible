@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>REDOS Monitoring Dashboard</title>
+<meta http-equiv="refresh" content="60">
+<style>
+  body{font-family:Segoe UI,Roboto,Arial,sans-serif;background:#0f1117;color:#e1e4ee;margin:0;padding:20px;min-height:100vh}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid #2a2d3a}
+  h1{margin:0;color:#fff;font-size:22px}
+  h1 span{color:#d23f3f}
+  .ts{color:#888;font-size:13px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+  .card{background:#181b24;border-radius:8px;padding:18px;box-shadow:0 1px 6px rgba(0,0,0,.3);border:1px solid #232633}
+  .card h2{margin:0 0 12px 0;font-size:16px;color:#fff;border-bottom:1px solid #2a2d3a;padding-bottom:8px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #232633}
+  th{color:#888;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  .status-active{color:#5ee08a}
+  .status-inactive,.status-failed{color:#ff6b6b}
+  .status-unknown,.status-not-installed{color:#777}
+  .metric{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+  .metric .lbl{color:#888;font-size:12px}
+  .metric .val{font-size:22px;font-weight:700;color:#fff}
+  .bar{height:6px;background:#252837;border-radius:3px;overflow:hidden;margin-top:4px}
+  .bar > div{height:100%;background:#5ee08a;transition:width .3s}
+  .bar.warn > div{background:#f3b34a}
+  .bar.bad > div{background:#ff6b6b}
+  .empty{color:#666;font-style:italic;font-size:13px}
+  footer{margin-top:24px;text-align:center;color:#555;font-size:12px}
+  a{color:#5b8def}
+  .reports-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:8px}
+  .report-link{display:block;background:#202533;padding:14px;border-radius:6px;text-decoration:none;color:#e1e4ee;border:1px solid #2d3344;transition:all .2s}
+  .report-link:hover{background:#283041;border-color:#5b8def;transform:translateY(-1px)}
+  .report-link strong{display:block;color:#fff;margin-bottom:4px;font-size:14px}
+  .report-link span{color:#999;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>REDOS <span>Monitoring</span> Dashboard</h1>
+  <div class="ts" id="ts">обновлено: <span id="time">—</span></div>
+</header>
+
+<div class="grid">
+  <div class="card" id="card-services">
+    <h2>Сервисы</h2>
+    <div id="services-body">загрузка…</div>
+  </div>
+
+  <div class="card" id="card-load">
+    <h2>Нагрузка</h2>
+    <div id="load-body">загрузка…</div>
+  </div>
+
+  <div class="card" id="card-security">
+    <h2>Безопасность</h2>
+    <div id="security-body">загрузка…</div>
+  </div>
+</div>
+
+<div class="card" id="card-reports" style="margin-top:16px">
+  <h2>📊 Отчёты</h2>
+  <div class="reports-grid">
+    <a class="report-link" href="reports/latest_daily.html" target="_blank">
+      <strong>Ежедневный — HTML</strong>
+      <span>Открыть в браузере</span>
+    </a>
+    <a class="report-link" href="reports/latest_daily.pdf" target="_blank">
+      <strong>Ежедневный — PDF</strong>
+      <span>Скачать или распечатать</span>
+    </a>
+    <a class="report-link" href="reports/latest_weekly.html" target="_blank">
+      <strong>Еженедельный — HTML</strong>
+      <span>С графиком CPU/RAM/Disk</span>
+    </a>
+    <a class="report-link" href="reports/latest_weekly.pdf" target="_blank">
+      <strong>Еженедельный — PDF</strong>
+      <span>Скачать или распечатать</span>
+    </a>
+    <a class="report-link" href="reports/" target="_blank">
+      <strong>📁 Архив всех отчётов</strong>
+      <span>Все накопленные файлы</span>
+    </a>
+  </div>
+</div>
+
+<footer>
+  <p>Авто-обновление каждые 60 секунд</p>
+  <p>REDOS Monitoring — IT-Планета 2026 / Финал</p>
+</footer>
+
+<script>
+function fmt(n){ return (n===undefined || n===null) ? '—' : n; }
+function barLevel(v){
+  if (v === undefined || v === null) return '';
+  if (v >= 90) return 'bad';
+  if (v >= 75) return 'warn';
+  return '';
+}
+function statusClass(s){
+  if (s === 'active') return 'status-active';
+  if (s === 'inactive' || s === 'failed' || s === 'activating') return 'status-inactive';
+  return 'status-unknown';
+}
+
+async function fetchJSON(url){
+  try {
+    const r = await fetch(url, {cache:'no-store'});
+    if (!r.ok) return null;
+    return await r.json();
+  } catch(e) { return null; }
+}
+
+async function render(){
+  document.getElementById('time').textContent = new Date().toLocaleString();
+
+  const [svc, load, sec] = await Promise.all([
+    fetchJSON('state/state_services.json'),
+    fetchJSON('state/state_performance.json'),
+    fetchJSON('state/state_security.json'),
+  ]);
+
+  // services
+  const svcBody = document.getElementById('services-body');
+  if (svc && svc.services && svc.services.length) {
+    let rows = '<table><thead><tr><th>Сервис</th><th>Состояние</th><th>Действие</th></tr></thead><tbody>';
+    svc.services.sort((a,b)=>a.name.localeCompare(b.name)).forEach(s => {
+      rows += `<tr><td>${s.name}</td><td class="${statusClass(s.status)}">${s.status}</td><td>${s.action||''}</td></tr>`;
+    });
+    rows += '</tbody></table>';
+    svcBody.innerHTML = rows;
+  } else {
+    svcBody.innerHTML = '<div class="empty">данные не получены</div>';
+  }
+
+  // load
+  const loadBody = document.getElementById('load-body');
+  if (load && load.timestamp) {
+    const cpu = load.cpu_usage_pct, mem = load.memory ? load.memory.used_pct : 0,
+          swap = load.swap ? load.swap.used_pct : 0, iowait = load.iowait_pct;
+    let body = '';
+    function metric(label, val) {
+      const lvl = barLevel(val);
+      const v = isFinite(val) ? val : 0;
+      return `<div class="metric"><span class="lbl">${label}</span><span class="val">${fmt(val)}%</span></div>
+              <div class="bar ${lvl}"><div style="width:${Math.min(100, v)}%"></div></div>`;
+    }
+    body += metric('CPU', cpu);
+    body += metric('RAM', mem);
+    body += metric('SWAP', swap);
+    body += metric('IOWAIT', iowait);
+    // disks
+    if (load.disks && load.disks.length){
+      body += '<h3 style="margin-top:14px;font-size:13px;color:#aaa">Диски</h3>';
+      load.disks.forEach(d => {
+        body += `<div class="metric" style="margin:6px 0"><span class="lbl">${d.mount}</span><span class="val" style="font-size:14px">${d.used_pct}%</span></div>
+                 <div class="bar ${barLevel(d.used_pct)}"><div style="width:${d.used_pct}%"></div></div>`;
+      });
+    }
+    if (load.warnings && load.warnings.length){
+      body += `<p style="color:#f3b34a;margin-top:12px;font-size:12px">⚠ ${load.warnings.join('; ')}</p>`;
+    }
+    loadBody.innerHTML = body;
+  } else {
+    loadBody.innerHTML = '<div class="empty">данные не получены</div>';
+  }
+
+  // security
+  const secBody = document.getElementById('security-body');
+  if (sec && sec.timestamp) {
+    const banned = (sec.banned_ips||[]).join(', ') || '—';
+    const ports = (sec.unexpected_ports||[]).join(', ') || '—';
+    const failed = (sec.failed_logins||[]).length;
+    secBody.innerHTML = `
+      <div class="metric"><span class="lbl">IP в бане</span><span class="val">${(sec.banned_ips||[]).length}</span></div>
+      <div class="metric"><span class="lbl">Неудачных входов</span><span class="val">${failed}</span></div>
+      <div class="metric"><span class="lbl">Подозр. порты</span><span class="val">${(sec.unexpected_ports||[]).length}</span></div>
+      <div class="metric"><span class="lbl">Ошибок в journal</span><span class="val">${sec.journal_error_count||0}</span></div>
+      <p style="font-size:12px;color:#888;margin-top:14px">Banned: ${banned}<br>Ports: ${ports}</p>
+    `;
+  } else {
+    secBody.innerHTML = '<div class="empty">данные не получены</div>';
+  }
+}
+
+render();
+setInterval(render, 60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Unit]
+Description=REDOS Monitoring maintenance timer - {{ item.description }}
+
+[Timer]
+OnCalendar={{ item.calendar }}
+RandomizedDelaySec={{ item.delay }}
+Persistent=true
+Unit=monitor-maintenance-{{ item.action }}.service
+
+[Install]
+WantedBy=timers.target

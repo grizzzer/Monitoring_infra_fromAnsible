@@ -1,0 +1,14 @@
+[Unit]
+Description=REDOS Monitoring maintenance - {{ item.description }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=40%
+MemoryMax=512M
+ExecStart={{ mon_base_dir }}/bin/monitor_maintenance.sh {{ item.action }}
+TimeoutStartSec={{ item.timeout }}
+SuccessExitStatus=0

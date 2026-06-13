@@ -1,0 +1,12 @@
+[Unit]
+Description=REDOS Monitoring - performance timer
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec={{ mon_freq_performance }}s
+RandomizedDelaySec=5
+AccuracySec=2s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

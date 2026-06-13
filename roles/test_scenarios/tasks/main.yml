@@ -1,0 +1,382 @@
+---
+# ============================================================
+#  test_scenarios — управляемая имитация инцидентов для защиты.
+#
+#  ВСЕ задачи имеют tag: never, поэтому в обычном прогоне НЕ выполняются.
+#  Вызываются явно:
+#    --tags failure_demo      — имитация одного падения и алерт
+#    --tags isolation_demo    — имитация 3 сбоев подряд → карантин
+#    --tags bruteforce_demo   — 6 неудачных входов с лупбэка → бан в firewalld
+#    --tags report_now        — ручной триггер ежедневного отчёта
+#    --tags report_weekly_now — ручной триггер еженедельного отчёта с графиками
+#    --tags archive_now       — ручной триггер архивирования отчётов
+#    --tags maintenance_now   — ручной триггер обслуживания (cleanup/fscheck)
+# ============================================================
+
+# === 1. Падение сервиса (одиночное) =========================
+- name: "[failure_demo] Install deliberately failing demo service"
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/monitor-failure-demo.service
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=REDOS Monitoring deliberate failure demo
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/false
+      RemainAfterExit=no
+  register: failure_demo_unit
+  tags: [failure_demo, isolation_demo]
+
+- name: "[failure_demo] Reload systemd for demo unit"
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: failure_demo_unit.changed
+  tags: [failure_demo, isolation_demo]
+
+- name: "[failure_demo] Reset demo counters"
+  ansible.builtin.file:
+    path: "{{ mon_state_dir }}/restart_count/monitor-failure-demo"
+    state: absent
+  tags: [failure_demo, isolation_demo]
+
+- name: "[failure_demo] Simulate one service failure and failed recovery"
+  ansible.builtin.command:
+    argv:
+      - "{{ mon_base_dir }}/bin/monitor_services.sh"
+      - --service
+      - monitor-failure-demo
+      - --port
+      - "65534"
+      - --isolation-seconds
+      - "120"
+  changed_when: false
+  failed_when: false
+  tags: [failure_demo]
+
+- name: "[failure_demo] Show service failure evidence"
+  ansible.builtin.shell: |
+    echo "=== {{ mon_incident_log }} (последние 12 строк) ==="
+    tail -n 12 {{ mon_incident_log }}
+    echo ""
+    echo "=== state_services.json ==="
+    cat {{ mon_state_dir }}/state_services.json
+  register: failure_demo_result
+  changed_when: false
+  tags: [failure_demo]
+
+- name: "[failure_demo] Result"
+  ansible.builtin.debug:
+    var: failure_demo_result.stdout_lines
+  tags: [failure_demo]
+
+# === 2. ИЗОЛЯЦИЯ: 3 сбоя подряд =============================
+- name: "[isolation_demo] Simulate three consecutive failed recoveries"
+  ansible.builtin.command:
+    argv:
+      - "{{ mon_base_dir }}/bin/monitor_services.sh"
+      - --service
+      - monitor-failure-demo
+      - --port
+      - "65534"
+      - --isolation-seconds
+      - "120"
+  loop: [1, 2, 3]
+  loop_control:
+    label: "failed recovery {{ item }}/3"
+  changed_when: false
+  failed_when: false
+  tags: [isolation_demo]
+
+- name: "[isolation_demo] Collect temporary host quarantine evidence"
+  ansible.builtin.shell: |
+    echo "=== firewalld rich-rules (с automatic timeout) ==="
+    firewall-cmd --list-rich-rules 2>/dev/null || true
+    echo ""
+    echo "=== quarantine state ==="
+    cat {{ mon_state_dir }}/isolation/host 2>/dev/null || echo "(нет файла — карантин не активен)"
+    echo ""
+    echo "=== infrastructure_monitor.log (последние 20 строк) ==="
+    tail -n 20 {{ mon_incident_log }}
+  register: isolation_demo_result
+  changed_when: false
+  tags: [isolation_demo]
+
+- name: "[isolation_demo] Result"
+  ansible.builtin.debug:
+    var: isolation_demo_result.stdout_lines
+  tags: [isolation_demo]
+
+# === 3. Brute-force demo ====================================
+# Имитируем 7 неудачных SSH-логинов на самих себя, потом запускаем
+# monitor_security.sh и показываем что IP в firewalld забанен.
+- name: "[bruteforce_demo] Install sshpass for failed-login simulation"
+  ansible.builtin.dnf:
+    name: sshpass
+    state: present
+  ignore_errors: true
+  tags: [bruteforce_demo]
+
+- name: "[bruteforce_demo] Clear throttle (чтобы алерт точно ушёл)"
+  ansible.builtin.shell: |
+    rm -f {{ mon_state_dir }}/throttle/sec_brute_*
+  changed_when: false
+  tags: [bruteforce_demo]
+
+- name: "[bruteforce_demo] Generate 7 failed SSH attempts from 127.0.0.1"
+  ansible.builtin.shell: |
+    for i in 1 2 3 4 5 6 7; do
+        sshpass -p 'definitely-wrong-password' \
+            ssh -o StrictHostKeyChecking=no \
+                -o PreferredAuthentications=password \
+                -o ConnectTimeout=2 \
+                -p 2026 nosuchuser_$i@127.0.0.1 true 2>/dev/null || true
+    done
+    # Даём журналу секунду на запись
+    sleep 2
+  changed_when: false
+  failed_when: false
+  tags: [bruteforce_demo]
+
+- name: "[bruteforce_demo] Trigger monitor_security.sh"
+  ansible.builtin.command: "{{ mon_base_dir }}/bin/monitor_security.sh"
+  changed_when: false
+  failed_when: false
+  tags: [bruteforce_demo]
+
+- name: "[bruteforce_demo] Collect evidence"
+  ansible.builtin.shell: |
+    echo "=== Failed login events в journald за последние 5 минут ==="
+    journalctl --since '5 minutes ago' --no-pager 2>/dev/null \
+        | grep -Ei 'Failed password|Invalid user|authentication failure' \
+        | tail -10 || echo "(пусто — но события могут быть в /var/log/secure)"
+    echo ""
+    echo "=== /var/log/secure (если активен rsyslog) ==="
+    tail -n 30 /var/log/secure 2>/dev/null \
+        | grep -Ei 'Failed password|Invalid user|authentication failure' \
+        | tail -10 || echo "(rsyslog не пишет mail в файл)"
+    echo ""
+    echo "=== state_security.json — счётчики по IP ==="
+    cat {{ mon_state_dir }}/state_security.json | python3 -m json.tool 2>/dev/null || cat {{ mon_state_dir }}/state_security.json
+    echo ""
+    echo "=== firewalld rich-rules (тут должен быть REJECT для нашего IP) ==="
+    firewall-cmd --list-rich-rules 2>/dev/null || echo "(firewalld не активен)"
+    echo ""
+    echo "=== infrastructure_monitor.log (security записи) ==="
+    grep -E "security \|" {{ mon_incident_log }} | tail -10
+  register: bruteforce_demo_result
+  changed_when: false
+  tags: [bruteforce_demo]
+
+- name: "[bruteforce_demo] Result"
+  ansible.builtin.debug:
+    var: bruteforce_demo_result.stdout_lines
+  tags: [bruteforce_demo]
+
+# === 4. Ручной триггер ежедневного отчёта =================
+- name: "[report_now] Generate daily report immediately"
+  ansible.builtin.command:
+    argv: ["{{ mon_base_dir }}/bin/generate_report.sh", "daily"]
+  register: report_now_daily
+  changed_when: false
+  tags: [report_now]
+
+- name: "[report_now] Result"
+  ansible.builtin.debug:
+    msg:
+      - "Generated daily report files:"
+      - "  {{ report_now_daily.stdout }}"
+      - "  symlinks: {{ mon_report_dir }}/latest_daily.{html,pdf,txt}"
+  tags: [report_now]
+
+# === 5. Ручной триггер еженедельного отчёта (с графиками) ===
+- name: "[report_weekly_now] Generate weekly report with graphs"
+  ansible.builtin.command:
+    argv: ["{{ mon_base_dir }}/bin/generate_report.sh", "weekly"]
+  register: report_now_weekly
+  changed_when: false
+  tags: [report_weekly_now]
+
+- name: "[report_weekly_now] Result"
+  ansible.builtin.debug:
+    msg:
+      - "Generated weekly report files:"
+      - "  {{ report_now_weekly.stdout }}"
+      - "  symlinks: {{ mon_report_dir }}/latest_weekly.{html,pdf,txt}"
+  tags: [report_weekly_now]
+
+# === 6. Ручной триггер архивирования ========================
+- name: "[archive_now] Archive reports from the last month"
+  ansible.builtin.command: "{{ mon_base_dir }}/bin/archive_reports.sh"
+  register: archive_now_result
+  changed_when: false
+  tags: [archive_now]
+
+- name: "[archive_now] List archives"
+  ansible.builtin.shell: |
+    ls -la {{ mon_archive_dir }}/ 2>/dev/null || echo "(нет архивов)"
+  register: archive_list
+  changed_when: false
+  tags: [archive_now]
+
+- name: "[archive_now] Result"
+  ansible.builtin.debug:
+    msg: "{{ archive_list.stdout_lines }}"
+  tags: [archive_now]
+
+# === 7. Ручной триггер обслуживания ========================
+- name: "[maintenance_now] Run weekly cleanup"
+  ansible.builtin.command:
+    argv: ["{{ mon_base_dir }}/bin/monitor_maintenance.sh", "cleanup"]
+  changed_when: false
+  failed_when: false
+  tags: [maintenance_cleanup_now]
+
+- name: "[maintenance_fscheck_now] Run monthly filesystem check"
+  ansible.builtin.command:
+    argv: ["{{ mon_base_dir }}/bin/monitor_maintenance.sh", "fscheck"]
+  changed_when: false
+  failed_when: false
+  tags: [maintenance_fscheck_now]
+
+- name: "[maintenance] Last 30 lines of maintenance.log"
+  ansible.builtin.shell: tail -n 30 {{ mon_log_dir }}/maintenance.log 2>/dev/null
+  register: maint_log
+  changed_when: false
+  tags: [maintenance_cleanup_now, maintenance_fscheck_now]
+
+- name: "[maintenance] Result"
+  ansible.builtin.debug:
+    msg: "{{ maint_log.stdout_lines }}"
+  tags: [maintenance_cleanup_now, maintenance_fscheck_now]
+
+# === 9. SMTP диагностика =====================================
+# Проверяет всю цепочку аутентификации SMTP-auth и показывает где конкретно
+# ломается. Если student1 не аутентифицируется — предлагает сбросить пароль.
+- name: "[smtp_diag] Show SMTP config (from monitor.env)"
+  ansible.builtin.shell: |
+    grep -E "^(SMTP_HOST|SMTP_PORT|SMTP_USER|ALERT_FROM|ALERT_TO|SMTP_USE_TLS)" \
+        {{ mon_config_dir }}/monitor.env | sed 's/SMTP_PASSWORD.*/SMTP_PASSWORD=***hidden***/'
+  register: smtp_env
+  changed_when: false
+  tags: [smtp_diag]
+
+- name: "[smtp_diag] Test STARTTLS handshake via openssl"
+  ansible.builtin.shell: |
+    timeout 5 openssl s_client -starttls smtp -connect 127.0.0.1:587 -brief 2>&1 \
+        | head -15 || echo "openssl timeout"
+  register: smtp_starttls
+  changed_when: false
+  failed_when: false
+  tags: [smtp_diag]
+
+- name: "[smtp_diag] Try SASL AUTH with python smtplib (full diagnostics)"
+  ansible.builtin.shell: |
+    set -a
+    . {{ mon_config_dir }}/monitor.env
+    set +a
+    python3 - << 'PYEOF'
+    import os, smtplib, ssl, sys
+    host = os.environ.get('SMTP_HOST', '127.0.0.1')
+    port = int(os.environ.get('SMTP_PORT', '587'))
+    user = os.environ.get('SMTP_USER', '')
+    pwd  = os.environ.get('SMTP_PASSWORD', '')
+    print(f"Connecting to {host}:{port} as user={user!r}")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with smtplib.SMTP(host, port, timeout=10) as s:
+            s.ehlo()
+            print(f"  EHLO OK, STARTTLS available: {s.has_extn('starttls')}")
+            s.starttls(context=ctx)
+            s.ehlo()
+            print(f"  STARTTLS OK, auth mechanisms: {s.esmtp_features.get('auth', '?')}")
+            print(f"  Attempting LOGIN as {user}...")
+            s.login(user, pwd)
+            print(f"  ✓ AUTH OK — пароль корректен")
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"  ✗ AUTH FAILED: {e}")
+        print(f"  → Пароль student1 в LDAP не совпадает с vault_smtp_password")
+        sys.exit(2)
+    except Exception as e:
+        print(f"  ✗ ERROR: {type(e).__name__}: {e}")
+        sys.exit(3)
+    PYEOF
+  register: smtp_auth_test
+  changed_when: false
+  failed_when: false
+  tags: [smtp_diag]
+
+- name: "[smtp_diag] Verify student1 password against Samba directly"
+  ansible.builtin.shell: |
+    set -a
+    . {{ mon_config_dir }}/monitor.env
+    set +a
+    # Извлекаем username (без @domain)
+    USER="${SMTP_USER%%@*}"
+    echo "Testing Samba auth for user: $USER"
+    # Через kinit (Kerberos) — если работает, пароль корректен
+    if echo "$SMTP_PASSWORD" | timeout 5 kinit "$USER" 2>&1; then
+        echo "✓ Kerberos AUTH OK — пароль в Samba корректен"
+        kdestroy 2>/dev/null
+    else
+        echo "✗ Kerberos AUTH FAILED — пароль в Samba НЕ совпадает с vault_smtp_password"
+        echo ""
+        echo "ИСПРАВЛЕНИЕ:"
+        echo "  Вариант А — сбросить пароль student1 в Samba:"
+        echo "    sudo samba-tool user setpassword $USER --newpassword='Qwer1234!' --must-change-at-next-login=false"
+        echo ""
+        echo "  Вариант B — поменять SMTP-аккаунт на sysadmin (точно работает):"
+        echo "    ansible-vault edit group_vars/vault.yml"
+        echo "    vault_smtp_user: \"sysadmin@redos.test\""
+        echo "    vault_smtp_password: \"P@ssw0rd\""
+    fi
+  register: kinit_test
+  changed_when: false
+  failed_when: false
+  tags: [smtp_diag]
+
+- name: "[smtp_diag] Result"
+  ansible.builtin.debug:
+    msg:
+      - "=== SMTP CONFIG ==="
+      - "{{ smtp_env.stdout_lines }}"
+      - ""
+      - "=== STARTTLS handshake ==="
+      - "{{ smtp_starttls.stdout_lines }}"
+      - ""
+      - "=== Python smtplib AUTH test ==="
+      - "{{ smtp_auth_test.stdout_lines }}"
+      - ""
+      - "=== Samba/Kerberos password verification ==="
+      - "{{ kinit_test.stdout_lines }}"
+  tags: [smtp_diag]
+
+# === 10. Ручной сброс пароля student1 =======================
+# Сбрасывает пароль student1 в Samba до того, который зашит в vault.
+- name: "[fix_smtp_user] Reset student1 password to match vault"
+  ansible.builtin.shell: |
+    set -a
+    . {{ mon_config_dir }}/monitor.env
+    set +a
+    USER="${SMTP_USER%%@*}"
+    echo "Resetting password for $USER..."
+    samba-tool user setpassword "$USER" \
+        --newpassword="$SMTP_PASSWORD" \
+        --must-change-at-next-login=false 2>&1
+    samba-tool user enable "$USER" 2>&1 || true
+    echo ""
+    echo "Verifying via Kerberos:"
+    echo "$SMTP_PASSWORD" | kinit "$USER" && echo "✓ kinit OK" && kdestroy
+  register: fix_smtp_result
+  changed_when: true
+  failed_when: false
+  tags: [fix_smtp_user]
+
+- name: "[fix_smtp_user] Result"
+  ansible.builtin.debug:
+    msg: "{{ fix_smtp_result.stdout_lines }}"
+  tags: [fix_smtp_user]

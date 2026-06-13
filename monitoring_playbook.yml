@@ -1,0 +1,97 @@
+---
+- name: "Monitoring playbook help"
+  hosts: localhost
+  gather_facts: false
+  tags: [help, never]
+  tasks:
+    - name: "Show commands"
+      ansible.builtin.debug:
+        msg:
+          - "=== ОСНОВНОЕ РАЗВЁРТЫВАНИЕ ==="
+          - "  ansible-playbook monitoring_playbook.yml                        # полное развёртывание"
+          - "  ansible-playbook monitoring_playbook.yml --tags verify          # проверки"
+          - "  ansible-playbook monitoring_playbook.yml --tags run_once        # прогон скриптов сейчас"
+          - ""
+          - "=== ДЕМО СБОЯ / КАРАНТИНА (по требованию задания) ==="
+          - "  ansible-playbook monitoring_playbook.yml --tags failure_demo    # 1 имитация падения сервиса"
+          - "  ansible-playbook monitoring_playbook.yml --tags isolation_demo  # 3 сбоя → карантин хоста"
+          - "  ansible-playbook monitoring_playbook.yml --tags bruteforce_demo # 6 неудачных входов → бан IP"
+          - ""
+          - "=== РУЧНОЙ ТРИГГЕР ОТЧЁТОВ ==="
+          - "  ansible-playbook monitoring_playbook.yml --tags report_now         # ежедневный отчёт"
+          - "  ansible-playbook monitoring_playbook.yml --tags report_weekly_now  # еженедельный с графиками"
+          - "  ansible-playbook monitoring_playbook.yml --tags archive_now        # архивирование"
+          - ""
+          - "=== ОБСЛУЖИВАНИЕ ==="
+          - "  ansible-playbook monitoring_playbook.yml --tags maintenance_cleanup_now"
+          - "  ansible-playbook monitoring_playbook.yml --tags maintenance_fscheck_now"
+          - ""
+          - "=== ПРОВЕРКА С КЛИЕНТА ==="
+          - "  ansible-playbook monitoring_playbook.yml --tags client"
+          - ""
+          - "Подробная справка по тестам: docs/TESTING.md"
+
+- name: "Deploy continuous infrastructure monitoring"
+  hosts: monitoring
+  become: true
+  gather_facts: true
+  vars_files:
+    - group_vars/vault.yml
+
+  pre_tasks:
+    - name: "Wait for a temporarily unavailable host"
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+        delay: 2
+        sleep: 3
+      register: mon_connection
+      failed_when: false
+      when: ansible_connection | default('ssh') != 'local'
+      tags: [always]
+
+    - name: "Stop cleanly on an unreachable host"
+      ansible.builtin.meta: end_host
+      when:
+        - ansible_connection | default('ssh') != 'local'
+        - mon_connection is failed
+      tags: [always]
+
+  roles:
+    - role: common
+      tags: [common, prepare]
+    - role: notifications
+      tags: [notifications, notify]
+    - role: service_monitoring
+      tags: [services, service_monitoring]
+    - role: security_monitoring
+      tags: [security, security_monitoring]
+    - role: performance_monitoring
+      tags: [performance, performance_monitoring]
+    - role: incident_response
+      when: mon_incident_response_enabled | bool
+      tags: [incident, incident_response]
+    - role: maintenance
+      tags: [maintenance]
+    - role: reporting
+      tags: [reporting, reports]
+    - role: dashboard
+      when: mon_dashboard_enabled | bool
+      tags: [dashboard]
+    - role: test_scenarios
+      tags: [never]
+
+  post_tasks:
+    - name: "List monitoring timers"
+      ansible.builtin.command: systemctl list-timers --all --no-pager
+      register: mon_timers
+      changed_when: false
+      check_mode: false
+      tags: [verify]
+
+    - name: "Verification summary"
+      ansible.builtin.debug:
+        msg: "{{ mon_timers.stdout_lines | select('search', 'monitor-') | list }}"
+      tags: [verify]
+
+- name: "Optional checks from student workstations"
+  ansible.builtin.import_playbook: client_check.yml

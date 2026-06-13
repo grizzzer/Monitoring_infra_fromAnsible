@@ -1,0 +1,92 @@
+---
+- name: "Install report generators inherited and extended from v1"
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ mon_base_dir }}/bin/{{ item }}"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    backup: true
+  loop:
+    - generate_report.sh
+    - render_report.py
+    - archive_reports.sh
+
+- name: "Deploy root-level report templates required by the task"
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/{{ item.src }}"
+    dest: "{{ mon_base_dir }}/templates/{{ item.dest }}"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0640'
+  loop:
+    - { src: report_daily.html.j2, dest: report_daily.html.tpl }
+    - { src: report_weekly.html.j2, dest: report_weekly.html.tpl }
+
+- name: "Define reporting jobs"
+  ansible.builtin.set_fact:
+    mon_report_jobs:
+      - name: daily
+        description: daily HTML and PDF
+        command: generate_report.sh daily
+        calendar: "{{ mon_report_daily_calendar }}"
+        delay: 5min
+      - name: weekly
+        description: weekly HTML and PDF with graphs
+        command: generate_report.sh weekly
+        calendar: "{{ mon_report_weekly_calendar }}"
+        delay: 10min
+      - name: archive
+        description: archive reports from the last month
+        command: archive_reports.sh
+        calendar: "{{ mon_report_archive_calendar }}"
+        delay: 15min
+
+- name: "Install report services"
+  ansible.builtin.template:
+    src: monitor-report.service.j2
+    dest: "/etc/systemd/system/monitor-report-{{ item.name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ mon_report_jobs }}"
+  notify: reload reporting systemd
+
+- name: "Install report timers"
+  ansible.builtin.template:
+    src: monitor-report.timer.j2
+    dest: "/etc/systemd/system/monitor-report-{{ item.name }}.timer"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ mon_report_jobs }}"
+  notify: reload reporting systemd
+
+- name: "Enable report timers"
+  ansible.builtin.systemd:
+    name: "monitor-report-{{ item.name }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ mon_report_jobs }}"
+
+- name: "Generate daily and weekly reports now"
+  ansible.builtin.command: "{{ mon_base_dir }}/bin/generate_report.sh {{ item }}"
+  environment:
+    MON_BASE_DIR: "{{ mon_base_dir }}"
+    MON_STATE_DIR: "{{ mon_state_dir }}"
+    MON_REPORT_DIR: "{{ mon_report_dir }}"
+    MON_INCIDENT_LOG: "{{ mon_incident_log }}"
+  loop:
+    - daily
+    - weekly
+  register: generated_reports
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [report_now, verify]
+
+- name: "Show generated report paths"
+  ansible.builtin.debug:
+    msg: "{{ generated_reports.results | default([]) | map(attribute='stdout') | list }}"
+  tags: [report_now, verify]

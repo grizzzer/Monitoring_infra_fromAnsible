@@ -1,0 +1,15 @@
+[Unit]
+Description=REDOS Monitoring - student internet speed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=20%
+MemoryMax=128M
+ExecStart={{ mon_base_dir }}/bin/monitor_internet.sh
+TimeoutStartSec=60
+SuccessExitStatus=0 1

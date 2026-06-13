@@ -1,0 +1,12 @@
+[Unit]
+Description=REDOS Monitoring - internet speed timer
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec={{ mon_freq_internet }}s
+RandomizedDelaySec=30
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

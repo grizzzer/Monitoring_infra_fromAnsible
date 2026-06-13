@@ -1,0 +1,142 @@
+---
+# Open configuration. Secrets are loaded from group_vars/vault.yml.
+
+mon_domain: redos.test
+mon_server_host: admin.redos.test
+mon_server_ip: 192.168.254.1
+mon_management_ip: 192.168.254.1
+mon_classroom_network: 192.168.254.0/24
+
+mon_base_dir: /opt/monitoring
+mon_config_dir: /etc/monitoring
+mon_log_dir: /var/log/monitoring
+mon_state_dir: /var/lib/monitoring
+mon_report_dir: /var/log/monitoring/reports
+mon_archive_dir: /var/log/monitoring/archive
+mon_incident_log: /var/log/infrastructure_monitor.log
+
+mon_user: monitoring
+mon_group: monitoring
+
+# Add a service by adding one mapping here. No script changes are required.
+# critical=true: restart and quarantine after three consecutive failed recoveries.
+mon_services:
+  # === Сервисы по требованию задания (п.1) ===
+  - { name: samba,     description: "Контроллер домена Samba + файловый сервер", critical: true,  port: 445,  protocol: tcp }
+  - { name: dhcpd,     description: "DHCP-сервер",                              critical: true,  port: 67,   protocol: udp }
+  - { name: sshd,      description: "SSH-сервис (порт 2026)",                   critical: true,  port: 2026, protocol: tcp }
+  - { name: postfix,   description: "Почтовый сервер iRedMail (SMTP)",          critical: true,  port: 25,   protocol: tcp }
+  - { name: dovecot,   description: "Почтовый сервер iRedMail (IMAP/POP3)",     critical: true,  port: 143,  protocol: tcp }
+  - { name: squid,     description: "Прокси-сервер Squid",                      critical: true,  port: 3128, protocol: tcp }
+  - { name: nextcloud, description: "NextCloud (Apache + /nextcloud)",          critical: true,  port: 80,   protocol: tcp, check_url: "http://127.0.0.1/nextcloud/status.php" }
+  - { name: firewalld, description: "Брандмауэр firewalld",                     critical: true,  port: 0,    protocol: tcp }
+  # === Сопутствующие зависимости (тоже критичные) ===
+  - { name: httpd,     description: "Apache HTTP (хостит NextCloud + SOGo)",    critical: true,  port: 80,   protocol: tcp }
+  - { name: mariadb,   description: "MariaDB (NextCloud + iRedMail)",           critical: true,  port: 3306, protocol: tcp }
+  # === Опциональные — только при наличии (alert-only) ===
+  - { name: sogod,     description: "SOGo daemon",                              critical: false, port: 20000, protocol: tcp }
+
+mon_services_critical: "{{ mon_services | selectattr('critical', 'equalto', true) | list }}"
+mon_services_optional: "{{ mon_services | selectattr('critical', 'equalto', false) | list }}"
+
+# Required intervals.
+mon_freq_services: 300
+mon_freq_security: 300
+mon_freq_performance: 60
+mon_freq_internet: 600
+mon_freq_incidents: 300
+
+# Performance thresholds from the task.
+mon_threshold_cpu: 90
+mon_threshold_cpu_duration_min: 5
+mon_threshold_ram: 85
+mon_threshold_disk_warning_free: 10
+mon_threshold_disk_critical_free: 5
+mon_threshold_swap: 50
+mon_threshold_inode: 90
+mon_threshold_load1: 4.0
+mon_threshold_iowait: 30
+mon_threshold_internet_mbps: 0.8
+# Тестовый файл Selectel (100 МБ, российский хостинг — стабильный из РФ)
+mon_speedtest_url: "https://speedtest.selectel.ru/100MB"
+
+# Security: более 5 неудачных попыток входа за 5 минут → бан IP на 1 час
+# (требование задания, п.3). Порог = 6 — "более 5" по строгому толкованию.
+mon_security_failed_threshold: 6
+mon_security_failed_window_min: 5
+mon_security_ban_seconds: 3600
+mon_allowed_ports:
+  - 22
+  - 2026
+  - 25
+  - 53
+  - 67
+  - 68
+  - 80
+  - 88
+  - 110
+  - 111
+  - 135
+  - 137
+  - 138
+  - 139
+  - 143
+  - 323
+  - 389
+  - 443
+  - 445
+  - 464
+  - 465
+  - 587
+  - 636
+  - 993
+  - 995
+  - 3128
+  - 3268
+  - 3269
+  - 3306
+  - 20000
+
+# Automatic recovery and temporary host quarantine.
+mon_autorespond: true
+mon_restart_max_attempts: 3
+mon_isolation_enabled: true
+mon_isolation_seconds: 1800
+# "firewall" blocks the classroom subnet but keeps the management IP allowed.
+# "interface" disconnects the default interface and schedules reconnection.
+mon_isolation_mode: firewall
+
+mon_alert_from: "{{ vault_smtp_user | default('monitoring@' + mon_domain) }}"
+mon_alert_to: "{{ vault_alert_to | default('sysadmin@' + mon_domain) }}"
+mon_alert_subject_prefix: "[REDOS-MON]"
+mon_alert_throttle_min: 15
+mon_smtp_host: 127.0.0.1
+mon_smtp_port: 587
+mon_smtp_use_tls: true
+mon_smtp_require_tls_for_reports: true
+mon_smtp_verify_tls: false
+mon_smtp_ca_file: ""
+
+# Maintenance schedules.
+mon_maintenance_update_calendar: "*-*-* 03:00:00"
+mon_maintenance_cleanup_calendar: "Sun *-*-* 02:00:00"
+mon_maintenance_fscheck_calendar: "*-*-01 05:00:00"
+mon_maintenance_security_only: false
+mon_log_retention_days: 30
+
+# Reports: daily HTML/PDF, weekly HTML/PDF with SVG graphs, monthly archives.
+mon_report_daily_calendar: "*-*-* 23:55:00"
+mon_report_weekly_calendar: "Sun *-*-* 23:00:00"
+mon_report_archive_calendar: "*-*-01 04:00:00"
+mon_report_retention_days: 31
+mon_report_archive_keep_months: 12
+
+# Components inherited from PLAYBOOKS_FINAL_v1.
+mon_dashboard_enabled: true
+mon_dashboard_path: /var/www/monitoring
+mon_dashboard_url_path: /monitoring
+# IP-allowlist для дашборда. По умолчанию: "all" — доступ с любого IP
+# (защита остаётся только на уровне Basic Auth). Альтернатива — ограничить
+# определённой подсетью: "127.0.0.1 192.168.254.0/24"
+mon_dashboard_ip_allowlist: "all"
+mon_incident_response_enabled: true

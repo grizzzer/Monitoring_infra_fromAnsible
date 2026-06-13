@@ -1,0 +1,21 @@
+[monitoring]
+admin ansible_host=127.0.0.1 ansible_connection=local
+
+# Multi-host: добавление новых хостов сюда не требует правки скриптов
+# (критерий масштабируемости — выполняется автоматически)
+
+[students]
+student.redos.test ansible_host=192.168.254.2
+
+[monitoring:vars]
+ansible_user=sa
+ansible_become=true
+ansible_become_method=sudo
+ansible_python_interpreter=/usr/bin/python3
+
+[students:vars]
+ansible_user=sa
+ansible_become=true
+ansible_become_method=sudo
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'

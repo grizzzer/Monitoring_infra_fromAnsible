@@ -1,0 +1,15 @@
+[Unit]
+Description=REDOS Monitoring - CPU, RAM and disk
+After=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=30%
+MemoryMax=256M
+TasksMax=64
+ExecStart={{ mon_base_dir }}/bin/monitor_performance.sh
+TimeoutStartSec=120
+SuccessExitStatus=0 1

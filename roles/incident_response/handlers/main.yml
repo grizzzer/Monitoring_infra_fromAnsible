@@ -1,0 +1,4 @@
+---
+- name: reload incident systemd
+  ansible.builtin.systemd:
+    daemon_reload: true

@@ -1,0 +1,98 @@
+---
+# ============================================================
+#  roles/service_monitoring — мониторинг сервисов (5 минут)
+#
+#  Требование задания (п.1):
+#    Каждые 5 минут проверять сервисы: samba, dhcpd, sshd (2026),
+#    postfix, dovecot, squid, httpd (NextCloud), firewalld.
+#  Требование (п.2): авторестарт, email, лог, изоляция 3 сбоев.
+# ============================================================
+
+- name: "Установка monitor_services.sh"
+  ansible.builtin.copy:
+    src: monitor_services.sh
+    dest: "{{ mon_base_dir }}/bin/monitor_services.sh"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    backup: yes
+  register: __sm_copy
+  tags: [services, scripts]
+
+- name: "Симлинк /usr/local/bin/monitor-services"
+  ansible.builtin.file:
+    src: "{{ mon_base_dir }}/bin/monitor_services.sh"
+    dest: /usr/local/bin/monitor-services
+    state: link
+    force: yes
+  tags: [services]
+
+# При обновлении скрипта сбрасываем счётчики попыток рестарта
+- name: "Сброс счётчиков рестартов при обновлении скрипта"
+  ansible.builtin.file:
+    path: "{{ mon_state_dir }}/restart_count"
+    state: absent
+  when: __sm_copy.changed
+  tags: [services]
+
+- name: "Пересоздание restart_count"
+  ansible.builtin.file:
+    path: "{{ mon_state_dir }}/restart_count"
+    state: directory
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+  tags: [services]
+
+# Systemd timer + service unit
+- name: "Установка monitor-services.service"
+  ansible.builtin.template:
+    src: monitor-services.service.j2
+    dest: /etc/systemd/system/monitor-services.service
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  notify: reload systemd
+  tags: [services, systemd]
+
+- name: "Установка monitor-services.timer"
+  ansible.builtin.template:
+    src: monitor-services.timer.j2
+    dest: /etc/systemd/system/monitor-services.timer
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  notify: reload systemd
+  tags: [services, systemd]
+
+- name: "Запуск таймера"
+  ansible.builtin.systemd:
+    name: monitor-services.timer
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  tags: [services, systemd]
+
+# --- run_once ---
+- name: "[run_once] Прогон скрипта сейчас"
+  ansible.builtin.command: "{{ mon_base_dir }}/bin/monitor_services.sh"
+  register: __sm_run
+  changed_when: false
+  ignore_errors: yes
+  check_mode: no
+  tags: [services, run_once, verify]
+
+- name: "[verify] state_services.json"
+  ansible.builtin.command: "cat {{ mon_state_dir }}/state_services.json"
+  register: __sm_state
+  changed_when: false
+  ignore_errors: yes
+  check_mode: no
+  tags: [services, verify]
+
+- name: ">>> state_services.json"
+  ansible.builtin.debug:
+    msg: "{{ __sm_state.stdout | default('not found') }}"
+  tags: [services, verify]

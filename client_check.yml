@@ -1,0 +1,224 @@
+---
+# ============================================================
+#  client_check.yml — проверки и мониторинг производительности
+#  с клиентских станций (student).
+#
+#  Активируется тегом --tags client:
+#    ansible-playbook monitoring_playbook.yml --tags client
+#
+#  Что делает:
+#    1. ping admin'a с клиента
+#    2. Проверка ключевых TCP-портов admin'a
+#    3. Измерение скорости интернета с клиента
+#    4. Снимок CPU/RAM/disk на клиенте → /var/lib/monitoring/state_client.json
+#    5. Передача данных на admin для включения в отчёты
+# ============================================================
+
+- name: "Check server access and performance metrics from student hosts"
+  hosts: students
+  become: true
+  gather_facts: true
+  tags: [client, never]
+  vars_files:
+    - group_vars/monitoring.yml
+    - group_vars/vault.yml
+  tasks:
+    - name: "Wait for student host (60s tolerant)"
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+      register: client_connection
+      failed_when: false
+
+    - name: "Skip unavailable student"
+      ansible.builtin.meta: end_host
+      when: client_connection is failed
+
+    # === Сетевые проверки ===
+    # Используем ping с явным sudo и -c1 (одна попытка достаточно).
+    # Под некоторыми SELinux/cap-restrict ping без root возвращает 1 — поэтому become:yes.
+    - name: "Check server ICMP"
+      ansible.builtin.shell: |
+        ping -c 2 -W 2 {{ mon_server_ip }} >/dev/null 2>&1 && echo OK || echo FAIL
+      register: client_ping
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: "Check required server ports"
+      ansible.builtin.wait_for:
+        host: "{{ mon_server_ip }}"
+        port: "{{ item }}"
+        timeout: 3
+      loop:
+        - 2026   # SSH
+        - 25     # SMTP
+        - 80     # HTTP / NextCloud
+        - 143    # IMAP
+        - 445    # SMB / Samba
+        - 3128   # Squid
+      register: client_ports
+      failed_when: false
+
+    # === Скорость интернета (требование задания, п.4) ===
+    # Логика:
+    #   1. curl без --fail (partial-transfer 28 — нормально, нам важна скорость)
+    #   2. -L — следуем редиректам (selectel.ru может редиректить)
+    #   3. --max-time 15 — успеваем замерить, но не качаем 100MB полностью
+    #   4. --connect-timeout 5 — быстро отваливаемся если DNS/route не работает
+    #   5. Запасной HTTP-вариант если HTTPS-handshake не успевает
+    - name: "Measure student internet speed over HTTPS"
+      ansible.builtin.shell: |
+        # Основной замер (HTTPS, selectel)
+        result=$(curl -L --silent --show-error \
+            --connect-timeout 5 --max-time 15 \
+            -o /dev/null \
+            -w '%{speed_download} %{http_code}' \
+            '{{ mon_speedtest_url }}' 2>/dev/null || echo "0 000")
+        bytes=$(echo "$result" | awk '{print $1}')
+        http=$(echo "$result" | awk '{print $2}')
+        case "$bytes" in ''|*[!0-9.]*) bytes=0 ;; esac
+        # Если HTTPS-замер вернул 0 — попробуем HTTP (без TLS-overhead)
+        if [ "$(awk -v b="$bytes" 'BEGIN { print (b == 0) ? "1" : "0" }')" = "1" ]; then
+            # Замер через альтернативный URL
+            alt=$(curl -L --silent --show-error \
+                --connect-timeout 5 --max-time 15 \
+                -o /dev/null \
+                -w '%{speed_download}' \
+                'http://speedtest.tele2.net/10MB.zip' 2>/dev/null || echo 0)
+            case "$alt" in ''|*[!0-9.]*) alt=0 ;; esac
+            if [ "$(awk -v b="$alt" 'BEGIN { print (b > 0) ? "1" : "0" }')" = "1" ]; then
+                bytes="$alt"
+                http="200(via-fallback)"
+            fi
+        fi
+        # Выводим Mbit/s + http код в stderr для отладки
+        echo "http=$http bytes=$bytes" >&2
+        awk -v b="$bytes" 'BEGIN { printf "%.3f", (b*8)/1000000 }'
+      register: client_speed
+      changed_when: false
+      failed_when: false
+
+    # === Метрики производительности student'a ===
+    # CPU через vmstat — самый надёжный способ, есть везде где procps-ng.
+    # vmstat 1 2 = два замера с шагом 1с, берём второй (первый — boot avg).
+    # Колонка id (idle) — это процент простоя CPU, usage = 100 - id.
+    # Если vmstat нет — fallback на top.
+    - name: "Collect CPU usage"
+      ansible.builtin.shell: |
+        if command -v vmstat >/dev/null 2>&1; then
+            # Берём 2-ю строку — реальное измерение за последнюю секунду.
+            # Колонка id (idle) обычно 15-я, но считаем через NF-2 на случай разных версий.
+            vmstat 1 2 | awk 'END { for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) cols[++n]=$i; print 100 - cols[n-2] }'
+        elif command -v top >/dev/null 2>&1; then
+            # Fallback на top
+            top -b -n 2 -d 0.5 | grep -E "^%Cpu" | tail -1 | \
+                awk '{gsub(/[a-z,]/,""); print int($1+$3+$5)}'
+        else
+            echo 0
+        fi
+      register: client_cpu
+      changed_when: false
+      failed_when: false
+
+    - name: "Collect RAM usage"
+      ansible.builtin.shell: |
+        total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+        avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+        [ -z "$avail" ] && avail=$(awk '/^MemFree:/{print $2}' /proc/meminfo)
+        used=$(( total - avail ))
+        echo $(( used * 100 / total ))
+      register: client_ram
+      changed_when: false
+
+    - name: "Collect disk usage on /"
+      ansible.builtin.shell: |
+        df -P / | awk 'NR==2 {gsub("%","",$5); print $5}'
+      register: client_disk
+      changed_when: false
+
+    # === Сохранение state_client.json на самом клиенте ===
+    - name: "Ensure state dir on client"
+      ansible.builtin.file:
+        path: /var/lib/monitoring
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+
+    - name: "Save client state"
+      ansible.builtin.copy:
+        dest: /var/lib/monitoring/state_client.json
+        owner: root
+        group: root
+        mode: '0640'
+        content: |
+          {
+            "timestamp": "{{ ansible_date_time.iso8601 }}",
+            "host": "{{ inventory_hostname }}",
+            "ping_ok": {{ (client_ping.stdout | default('FAIL') | trim) == 'OK' | to_json }},
+            "ports_checked": {{ client_ports.results | default([]) | length }},
+            "internet_mbps": "{{ client_speed.stdout | default('0') | trim }}",
+            "cpu_pct": "{{ client_cpu.stdout | default('0') | trim }}",
+            "ram_pct": "{{ client_ram.stdout | default('0') | trim }}",
+            "disk_used_pct": "{{ client_disk.stdout | default('0') | trim }}"
+          }
+
+    - name: "Show CPU debug (chosen method)"
+      ansible.builtin.debug:
+        msg:
+          - "CPU stdout: {{ client_cpu.stdout | default('?') | trim }}"
+          - "CPU stderr: {{ client_cpu.stderr | default('') | trim }}"
+          - "Internet stderr (для отладки замера): {{ client_speed.stderr | default('') | trim }}"
+
+    - name: "Client check result"
+      ansible.builtin.debug:
+        msg:
+          - "Host:          {{ inventory_hostname }}"
+          - "Server ping:   {{ client_ping.stdout | default('?') | trim }}"
+          - "Ports OK:      {{ client_ports.results | default([]) | selectattr('failed', 'equalto', false) | list | length }}/6"
+          - "Internet:      {{ client_speed.stdout | default('?') | trim }} Mbit/s"
+          - "CPU:           {{ client_cpu.stdout | default('?') | trim }}%"
+          - "RAM:           {{ client_ram.stdout | default('?') | trim }}%"
+          - "Disk used:     {{ client_disk.stdout | default('?') | trim }}%"
+
+# === Передача данных клиентов на admin для включения в отчёты ===
+- name: "Aggregate client state on admin"
+  hosts: monitoring
+  become: true
+  gather_facts: true            # нужно для ansible_date_time
+  tags: [client, never]
+  vars_files:
+    - group_vars/monitoring.yml
+  tasks:
+    - name: "Save clients_state.json on admin"
+      ansible.builtin.copy:
+        dest: "{{ mon_state_dir }}/state_clients.json"
+        owner: root
+        group: "{{ mon_group }}"
+        mode: '0640'
+        content: |
+          {
+            "timestamp": "{{ ansible_date_time.iso8601 }}",
+            "clients": [
+          {% for host in groups['students'] | default([]) %}
+          {% set hv = hostvars[host] %}
+          {% set ping_ok = (hv['client_ping']['stdout'] | default('FAIL') | trim) == 'OK' %}
+              {
+                "host": "{{ host }}",
+                "ping_ok": {{ ping_ok | to_json }},
+                "ports_ok": {{ hv['client_ports']['results'] | default([]) | selectattr('failed', 'equalto', false) | list | length }},
+                "internet_mbps": "{{ hv['client_speed']['stdout'] | default('0') | trim }}",
+                "cpu_pct": "{{ hv['client_cpu']['stdout'] | default('0') | trim }}",
+                "ram_pct": "{{ hv['client_ram']['stdout'] | default('0') | trim }}",
+                "disk_used_pct": "{{ hv['client_disk']['stdout'] | default('0') | trim }}"
+              }{% if not loop.last %},{% endif %}
+          {% endfor %}
+            ]
+          }
+      ignore_errors: true
+      when: groups['students'] | default([]) | length > 0
+
+    - name: "Trigger dashboard sync to publish state_clients.json"
+      ansible.builtin.command: "{{ mon_base_dir }}/bin/dashboard_sync.sh"
+      changed_when: false
+      failed_when: false

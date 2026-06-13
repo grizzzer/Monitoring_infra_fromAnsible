@@ -1,0 +1,15 @@
+[Unit]
+Description=REDOS Monitoring — extended incident response (timer)
+
+[Timer]
+# Запуск через 90 секунд после загрузки (позже основных monitor таймеров)
+OnBootSec=90s
+# Период проверки: каждые {{ mon_freq_security | default(300) }} секунд (как security)
+OnUnitActiveSec={{ mon_freq_incidents | default(300) }}s
+RandomizedDelaySec=20
+AccuracySec=5s
+Unit=monitor-incidents.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

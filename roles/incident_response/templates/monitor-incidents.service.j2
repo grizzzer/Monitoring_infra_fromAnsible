@@ -1,0 +1,25 @@
+[Unit]
+Description=REDOS Monitoring — extended incident response (network/DNS/time/certs/OOM/mail/sockets/self)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Лимиты ресурсов — мониторинг НЕ должен мешать сервисам (критерий "эффективность")
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Жёсткий потолок CPU и памяти — даже если скрипт глюкнет, не уронит систему
+CPUQuota=30%
+MemoryMax=256M
+TasksMax=64
+
+ExecStart={{ mon_base_dir }}/bin/monitor_incidents.sh
+TimeoutStartSec=180
+StandardOutput=journal
+StandardError=journal
+# rc=0 (всё ок), rc=1 (мелкие проблемы выявлены — не падение)
+SuccessExitStatus=0 1
+
+# Защита от вечного зависания — kill после таймаута
+TimeoutStopSec=30
+KillMode=mixed

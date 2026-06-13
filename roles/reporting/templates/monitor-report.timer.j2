@@ -1,0 +1,11 @@
+[Unit]
+Description=REDOS Monitoring report timer - {{ item.description }}
+
+[Timer]
+OnCalendar={{ item.calendar }}
+RandomizedDelaySec={{ item.delay }}
+Persistent=true
+Unit=monitor-report-{{ item.name }}.service
+
+[Install]
+WantedBy=timers.target

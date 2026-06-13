@@ -1,0 +1,4 @@
+---
+- name: reload security systemd
+  ansible.builtin.systemd:
+    daemon_reload: true

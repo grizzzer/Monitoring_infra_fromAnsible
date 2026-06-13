@@ -1,0 +1,63 @@
+---
+- name: "Remove the monitoring system"
+  hosts: monitoring
+  become: true
+  gather_facts: false
+  tags: [never, uninstall_force]
+  vars_files:
+    - group_vars/vault.yml
+  vars:
+    monitoring_units:
+      - monitor-services
+      - monitor-security
+      - monitor-performance
+      - monitor-internet
+      - monitor-incidents
+      - monitor-maintenance-update
+      - monitor-maintenance-cleanup
+      - monitor-maintenance-fscheck
+      - monitor-report-daily
+      - monitor-report-weekly
+      - monitor-report-archive
+      - monitor-dashboard-sync
+  tasks:
+    - name: "Stop monitoring timers"
+      ansible.builtin.systemd:
+        name: "{{ item }}.timer"
+        state: stopped
+        enabled: false
+      loop: "{{ monitoring_units }}"
+      failed_when: false
+
+    - name: "Remove monitoring units"
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item.0 }}.{{ item.1 }}"
+        state: absent
+      loop: "{{ monitoring_units | product(['service', 'timer']) | list }}"
+
+    - name: "Remove monitoring paths"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ mon_base_dir }}"
+        - "{{ mon_config_dir }}"
+        - "{{ mon_log_dir }}"
+        - "{{ mon_state_dir }}"
+        - "{{ mon_incident_log }}"
+        - "{{ mon_dashboard_path }}"
+        - /etc/httpd/conf.d/monitoring.conf
+        - /etc/logrotate.d/monitoring
+        - /usr/local/bin/monitor-services
+        - /usr/local/bin/monitor_send_mail.sh
+        - /usr/local/bin/monitor_send_report.py
+
+    - name: "Reload systemd"
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: "Remove no-shell monitoring account"
+      ansible.builtin.user:
+        name: "{{ mon_user }}"
+        state: absent
+      failed_when: false

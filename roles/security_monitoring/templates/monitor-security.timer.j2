@@ -1,0 +1,13 @@
+[Unit]
+Description=REDOS Monitoring — security check (timer)
+
+[Timer]
+OnBootSec=120s
+OnUnitActiveSec={{ mon_freq_security }}s
+RandomizedDelaySec=15
+AccuracySec=5s
+Unit=monitor-security.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

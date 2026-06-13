@@ -1,0 +1,226 @@
+---
+# ============================================================
+#  roles/common — подготовка окружения мониторинга
+#  Запускается первой, остальные роли зависят от неё.
+# ============================================================
+
+- name: "Валидация переменных монitoring (fail-fast при ошибках конфига)"
+  ansible.builtin.assert:
+    that:
+      - mon_base_dir is defined and mon_base_dir | length > 0
+      - mon_log_dir is defined
+      - mon_state_dir is defined
+      - mon_config_dir is defined
+      - mon_threshold_cpu | int >= 1 and mon_threshold_cpu | int <= 100
+      - mon_threshold_ram | int >= 1 and mon_threshold_ram | int <= 100
+      - mon_threshold_disk_warning_free | int > mon_threshold_disk_critical_free | int
+      - mon_services is defined and mon_services | length > 0
+      - mon_smtp_host is defined and mon_smtp_port | int > 0
+    fail_msg: "Конфигурация мониторинга некорректна — проверьте group_vars/monitoring.yml"
+    success_msg: "Конфигурация OK"
+  tags: [common, validate]
+
+- name: "Установка пакетов мониторинга (5 retries устойчиво к временным сетевым сбоям)"
+  ansible.builtin.dnf:
+    name:
+      - sysstat                  # iostat, mpstat, sar
+      - procps-ng                # vmstat, free
+      - net-tools                # netstat
+      - iproute                  # ss
+      - mailx                    # mailx
+      - postfix                  # MTA
+      - postfix-ldap             # КРИТИЧНО: postfix нужно postfix-ldap для iRedMail
+      - jq                       # JSON-парсер
+      - python3                  # для шаблонов и smtplib
+      - python3-pip              # установка speedtest-cli
+      - logrotate
+      - acl                      # setfacl/getfacl
+      - bind-utils               # host, dig
+      - curl                     # internet speed check and HTTP verification
+      - openssl                  # TLS and certificate checks
+      - util-linux               # fsck, e2fsck для проверки FS
+      - e2fsprogs                # e2scrub/e2fsck
+      - xfsprogs                 # xfs_scrub on XFS
+      - tar
+      - gzip
+    state: present
+  register: __cm_pkgs
+  retries: 5
+  delay: 15
+  until: __cm_pkgs is succeeded
+  ignore_errors: yes
+  tags: [common, packages]
+
+# wkhtmltopdf — нужен для генерации PDF-отчётов с графиками и стилями.
+# В РЕД ОС может называться по-разному, перебираем варианты.
+- name: "Установка wkhtmltopdf (для PDF-отчётов с графиками)"
+  ansible.builtin.dnf:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - wkhtmltopdf
+    - wkhtmltox
+  register: __cm_wkhtml
+  failed_when: false
+  ignore_errors: yes
+  tags: [common, packages, pdf]
+
+# Если wkhtmltopdf нет — fallback на chromium для PDF-печати
+- name: "Fallback: chromium для PDF (если wkhtmltopdf недоступен)"
+  ansible.builtin.dnf:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - chromium
+    - chromium-browser
+  register: __cm_chromium
+  failed_when: false
+  ignore_errors: yes
+  when: __cm_wkhtml is failed
+  tags: [common, packages, pdf]
+
+- name: "Группа monitoring (для ограничения доступа к данным)"
+  ansible.builtin.group:
+    name: "{{ mon_group }}"
+    system: yes
+    state: present
+  tags: [common, security]
+
+- name: "Системный пользователь monitoring (без shell)"
+  ansible.builtin.user:
+    name: "{{ mon_user }}"
+    group: "{{ mon_group }}"
+    system: yes
+    shell: /sbin/nologin
+    home: "{{ mon_base_dir }}"
+    create_home: no
+    state: present
+  tags: [common, security]
+
+- name: "Каталоги мониторинга"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default(mon_group) }}"
+    mode: "{{ item.mode | default('0750') }}"
+  loop:
+    - { path: "{{ mon_base_dir }}",                mode: '0755', group: 'root' }
+    - { path: "{{ mon_base_dir }}/lib",            mode: '0755', group: 'root' }
+    - { path: "{{ mon_base_dir }}/bin",            mode: '0755', group: 'root' }
+    - { path: "{{ mon_base_dir }}/templates",      mode: '0755', group: 'root' }
+    - { path: "{{ mon_config_dir }}",              mode: '0750' }
+    - { path: "{{ mon_log_dir }}",                 mode: '0750' }
+    - { path: "{{ mon_report_dir }}",              mode: '0750' }
+    - { path: "{{ mon_archive_dir }}",             mode: '0750' }
+    - { path: "{{ mon_state_dir }}",               mode: '0750' }
+    - { path: "{{ mon_state_dir }}/throttle",      mode: '0750' }
+    - { path: "{{ mon_state_dir }}/restart_count", mode: '0750' }
+    - { path: "{{ mon_state_dir }}/cpu_history",   mode: '0750' }
+    - { path: "{{ mon_state_dir }}/history",       mode: '0750' }
+    - { path: "{{ mon_state_dir }}/isolation",     mode: '0750' }
+  tags: [common, dirs]
+
+# Критерий "безопасность" — ограничение доступа к данным мониторинга через ACL
+- name: "Apply restrictive ACLs without external Ansible collections"
+  ansible.builtin.command:
+    argv:
+      - setfacl
+      - -m
+      - "g:{{ mon_group }}:rx,d:g:{{ mon_group }}:rx,o::---,d:o::---"
+      - "{{ item }}"
+  loop:
+    - "{{ mon_log_dir }}"
+    - "{{ mon_state_dir }}"
+    - "{{ mon_report_dir }}"
+  changed_when: false
+  failed_when: false
+  tags: [common, security, acl]
+
+# Главный лог инцидентов (по требованию задания)
+- name: "Создание /var/log/infrastructure_monitor.log"
+  ansible.builtin.file:
+    path: "{{ mon_incident_log }}"
+    state: touch
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0640'
+  tags: [common, dirs]
+
+- name: "Create component log files with restricted access"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: touch
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0640'
+    modification_time: preserve
+    access_time: preserve
+  loop:
+    - "{{ mon_log_dir }}/services.log"
+    - "{{ mon_log_dir }}/performance.log"
+    - "{{ mon_log_dir }}/security.log"
+    - "{{ mon_log_dir }}/alerts.log"
+    - "{{ mon_log_dir }}/maintenance.log"
+  tags: [common, dirs]
+
+# Общая библиотека для bash-скриптов
+- name: "Установка monitor_common.sh"
+  ansible.builtin.copy:
+    src: monitor_common.sh
+    dest: "{{ mon_base_dir }}/lib/monitor_common.sh"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    backup: yes
+  tags: [common, scripts]
+
+# Центральный конфиг для всех скриптов
+- name: "/etc/monitoring/monitor.env"
+  ansible.builtin.template:
+    src: monitor.env.j2
+    dest: "{{ mon_config_dir }}/monitor.env"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0640'
+    backup: yes
+  tags: [common, config]
+
+# Ротация логов
+- name: "Logrotate /etc/logrotate.d/monitoring"
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/monitoring
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Ansible managed — ротация логов мониторинга
+      {{ mon_log_dir }}/*.log {
+          daily
+          rotate {{ mon_log_retention_days }}
+          compress
+          missingok
+          notifempty
+          delaycompress
+          create 0640 root {{ mon_group }}
+          sharedscripts
+      }
+      {{ mon_incident_log }} {
+          weekly
+          rotate 12
+          compress
+          missingok
+          notifempty
+          delaycompress
+          create 0640 root {{ mon_group }}
+      }
+  tags: [common, config]
+
+- name: "Проверка прав .vault_pass (должно быть 0600)"
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/.vault_pass"
+    mode: '0600'
+  delegate_to: localhost
+  become: no
+  ignore_errors: yes
+  tags: [common, security, vault]

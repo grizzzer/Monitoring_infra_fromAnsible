@@ -1,0 +1,68 @@
+---
+- name: "Install maintenance script"
+  ansible.builtin.copy:
+    src: monitor_maintenance.sh
+    dest: "{{ mon_base_dir }}/bin/monitor_maintenance.sh"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    backup: true
+
+- name: "Define maintenance jobs"
+  ansible.builtin.set_fact:
+    mon_maintenance_jobs:
+      - action: update
+        description: daily package update
+        calendar: "{{ mon_maintenance_update_calendar }}"
+        delay: 10min
+        timeout: 7200
+      - action: cleanup
+        description: weekly log cleanup
+        calendar: "{{ mon_maintenance_cleanup_calendar }}"
+        delay: 10min
+        timeout: 1800
+      - action: fscheck
+        description: monthly filesystem integrity check
+        calendar: "{{ mon_maintenance_fscheck_calendar }}"
+        delay: 30min
+        timeout: 7200
+
+- name: "Install maintenance services"
+  ansible.builtin.template:
+    src: monitor-maintenance.service.j2
+    dest: "/etc/systemd/system/monitor-maintenance-{{ item.action }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ mon_maintenance_jobs }}"
+  notify: reload maintenance systemd
+
+- name: "Install maintenance timers"
+  ansible.builtin.template:
+    src: monitor-maintenance.timer.j2
+    dest: "/etc/systemd/system/monitor-maintenance-{{ item.action }}.timer"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ mon_maintenance_jobs }}"
+  notify: reload maintenance systemd
+
+- name: "Enable maintenance timers"
+  ansible.builtin.systemd:
+    name: "monitor-maintenance-{{ item.action }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ mon_maintenance_jobs }}"
+
+- name: "Show maintenance schedules"
+  ansible.builtin.command: systemctl list-timers --all --no-pager
+  register: maintenance_timers
+  changed_when: false
+  check_mode: false
+  tags: [verify]
+
+- name: "Maintenance timer summary"
+  ansible.builtin.debug:
+    msg: "{{ maintenance_timers.stdout_lines | select('search', 'monitor-maintenance') | list }}"
+  tags: [verify]

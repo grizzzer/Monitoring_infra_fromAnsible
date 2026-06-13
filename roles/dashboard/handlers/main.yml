@@ -1,0 +1,10 @@
+---
+- name: restart dashboard httpd
+  ansible.builtin.systemd:
+    name: httpd
+    state: restarted
+  failed_when: false
+
+- name: reload dashboard systemd
+  ansible.builtin.systemd:
+    daemon_reload: true

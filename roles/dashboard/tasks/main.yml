@@ -1,0 +1,180 @@
+---
+- name: "Install dashboard dependencies"
+  ansible.builtin.dnf:
+    name:
+      - httpd
+      - httpd-tools
+    state: present
+  register: dashboard_packages
+  retries: 5
+  delay: 15
+  until: dashboard_packages is succeeded
+  failed_when: false
+
+- name: "Create protected dashboard directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: apache
+    mode: '0755'
+  loop:
+    - "{{ mon_dashboard_path }}"
+    - "{{ mon_dashboard_path }}/state"
+    - "{{ mon_dashboard_path }}/reports"
+
+- name: "Install dashboard inherited from v1"
+  ansible.builtin.copy:
+    src: index.html
+    dest: "{{ mon_dashboard_path }}/index.html"
+    owner: root
+    group: apache
+    mode: '0644'
+
+- name: "Create dashboard password file from Vault"
+  ansible.builtin.command:
+    cmd: "htpasswd -bc {{ mon_dashboard_path }}/.htpasswd {{ vault_dashboard_user }} {{ vault_dashboard_password }}"
+  no_log: true
+  changed_when: true
+
+- name: "Protect dashboard password file"
+  ansible.builtin.file:
+    path: "{{ mon_dashboard_path }}/.htpasswd"
+    owner: root
+    group: apache
+    mode: '0640'
+
+- name: "Configure Apache dashboard alias and access control"
+  ansible.builtin.copy:
+    dest: /etc/httpd/conf.d/monitoring.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Alias {{ mon_dashboard_url_path }} {{ mon_dashboard_path }}
+      <Directory "{{ mon_dashboard_path }}">
+          Options +Indexes +FollowSymLinks
+          AllowOverride None
+          AuthType Basic
+          AuthName "REDOS Monitoring"
+          AuthUserFile {{ mon_dashboard_path }}/.htpasswd
+      {% if mon_dashboard_ip_allowlist == "all" or mon_dashboard_ip_allowlist == "" %}
+          # Доступ с любого IP — защита только через Basic Auth
+          Require valid-user
+      {% else %}
+          <RequireAll>
+              Require valid-user
+              Require ip {{ mon_dashboard_ip_allowlist }}
+          </RequireAll>
+      {% endif %}
+      </Directory>
+
+      # Файл паролей доступен только Apache, никаких внешних запросов
+      <Files ".htpasswd">
+          Require all denied
+      </Files>
+  notify: restart dashboard httpd
+
+# Открываем порт 80 в firewalld (если ещё закрыт)
+- name: "Open HTTP port in firewalld for dashboard"
+  ansible.posix.firewalld:
+    service: http
+    permanent: true
+    immediate: true
+    state: enabled
+  failed_when: false
+
+- name: "Allow Apache to read the dashboard under SELinux"
+  ansible.builtin.command: "chcon -R -t httpd_sys_content_t {{ mon_dashboard_path }}"
+  changed_when: false
+  failed_when: false
+
+- name: "Install dashboard synchronization script"
+  ansible.builtin.copy:
+    dest: "{{ mon_base_dir }}/bin/dashboard_sync.sh"
+    owner: root
+    group: "{{ mon_group }}"
+    mode: '0750'
+    content: |
+      #!/bin/bash
+      # ВАЖНО: install -m 0644 -o root -g apache даёт Apache права на чтение.
+      # cp -Lf здесь использовать НЕЛЬЗЯ — он сохраняет mode 0640 от source,
+      # и Apache получает 403 Forbidden.
+      set -u
+
+      # === STATE JSON-файлы ===
+      for file in state_services.json state_performance.json state_security.json \
+                  state_internet.json state_incidents.json state_clients.json; do
+          [ -f "{{ mon_state_dir }}/$file" ] && \
+              install -m 0644 -o root -g apache "{{ mon_state_dir }}/$file" \
+                                                 "{{ mon_dashboard_path }}/state/$file"
+      done
+
+      # === ОТЧЁТЫ ===
+      # latest_* — это симлинки. readlink -f даёт реальный путь,
+      # install с явными правами даёт Apache доступ.
+      for file in latest_daily.html latest_daily.pdf latest_daily.txt latest_daily.json \
+                  latest_weekly.html latest_weekly.pdf latest_weekly.txt latest_weekly.json; do
+          src="{{ mon_report_dir }}/$file"
+          if [ -e "$src" ]; then
+              real="$(readlink -f "$src" 2>/dev/null || echo "$src")"
+              install -m 0644 -o root -g apache "$real" \
+                  "{{ mon_dashboard_path }}/reports/$file" 2>/dev/null || true
+          fi
+      done
+
+      # === SELinux: метим всё как httpd_sys_content_t ===
+      # Без этого Apache не может читать даже файлы с правильными правами.
+      if command -v chcon >/dev/null 2>&1; then
+          chcon -R -t httpd_sys_content_t "{{ mon_dashboard_path }}" 2>/dev/null || true
+      fi
+
+      # === Права на каталог reports — нужны для index/browse ===
+      chmod 0755 "{{ mon_dashboard_path }}/reports" 2>/dev/null || true
+      chmod 0755 "{{ mon_dashboard_path }}/state" 2>/dev/null || true
+
+- name: "Install dashboard sync units"
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    owner: root
+    group: root
+    mode: '0644'
+    content: "{{ item.content }}"
+  loop:
+    - name: monitor-dashboard-sync.service
+      content: |
+        [Unit]
+        Description=REDOS Monitoring dashboard synchronization
+        [Service]
+        Type=oneshot
+        Nice=15
+        ExecStart={{ mon_base_dir }}/bin/dashboard_sync.sh
+        TimeoutStartSec=60
+    - name: monitor-dashboard-sync.timer
+      content: |
+        [Unit]
+        Description=REDOS Monitoring dashboard synchronization timer
+        [Timer]
+        OnBootSec=45s
+        OnUnitActiveSec=60s
+        RandomizedDelaySec=5
+        [Install]
+        WantedBy=timers.target
+  notify: reload dashboard systemd
+
+- name: "Enable dashboard and synchronization"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - httpd
+    - monitor-dashboard-sync.timer
+  failed_when: false
+
+- name: "Synchronize dashboard now"
+  ansible.builtin.command: "{{ mon_base_dir }}/bin/dashboard_sync.sh"
+  changed_when: false
+  failed_when: false
+  tags: [verify]

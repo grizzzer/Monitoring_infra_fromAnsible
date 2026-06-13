@@ -1,0 +1,18 @@
+[Unit]
+Description=REDOS Monitoring — services check (with auto-restart and isolation)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=30%
+MemoryMax=256M
+TasksMax=64
+ExecStart={{ mon_base_dir }}/bin/monitor_services.sh
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+SuccessExitStatus=0 1
+KillMode=mixed
