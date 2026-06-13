@@ -272,10 +272,3 @@ xdg-open latest_daily.html
 - **Замена SMTP** — vault и `group_vars/monitoring.yml` (`mon_smtp_*`)
 - **Переход на cron вместо systemd timers** — заменить шаблоны `monitor-*.timer.j2`
 
-
-## Связанная документация
-
-- **`docs/QA_ANSWERS.md`** — подробные ответы на 11 ключевых вопросов:
-  карантин, brute-force, отчёты, PDF, ограничение доступа, что вставить в
-  итоговый PDF-отчёт о тестировании
-- **`docs/TESTING.md`** — пошаговые сценарии тестирования с фиксацией доказательств
